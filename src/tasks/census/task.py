@@ -4,6 +4,7 @@ import csv
 import mwparserfromhell
 from difflib import get_close_matches
 import subprocess
+from src.shared import allow_bots
 
 # CONFIG
 CSV_FILE = "census_latest.csv"  # format: geoid,place,population
@@ -47,13 +48,11 @@ site = pywikibot.Site("en", "wikipedia")
 # Get pages that transclude the templates
 templates = ["Template:US Census population", "Template:Infobox settlement"]
 pages = set()
-'''
+
 for t in templates:
     tpl = pywikibot.Page(site, t)
     for trans in tpl.getReferences(only_template_inclusion=True, follow_redirects=False):
         pages.add(trans)
-'''
-
 
 # add to pages using Category:Pages using US Census population needing update
 cat = pywikibot.Category(site, "Category:Pages using US Census population needing update")
@@ -70,6 +69,10 @@ def normalize_title(title):
 # Main loop
 total = 0
 for page in pages:
+    if not allow_bots(page,"Scaledbot"):
+        print(f"Skipping {page.title()}: bots not allowed")
+        continue
+
     title = str(page.title())
     found = False
     norm_title = normalize_title(title)
@@ -105,6 +108,11 @@ for page in pages:
         print(f"Skipping {title}: {e}")
         continue
 
+    # ensure page contains "US Census population" or "United States"
+    if not ("us census population" in text.lower() or "united states" in text.lower()):
+        print(f".    Skipping {title}: does not appear to be a US location")
+        continue
+
     wikicode = mwparserfromhell.parse(text)
     modified = False
 
@@ -113,36 +121,41 @@ for page in pages:
 
         if name == "us census population" and len(wikicode.filter_templates(matches=lambda t: t.name.strip().lower() == "us census population")) == 1:
             # check if it has 2020
-            if template.has("2020"):
+            if template.has(CENSUS_YEAR):
                 # if there is a discrepancy and it is sourced we let it slide
-                if template.get("2020").value.strip() != pop and template.has("2020n"):
-                    print(f"Skipping {title}: 2020 population differs and is sourced")
+                if template.get(CENSUS_YEAR).value.strip() != pop and template.has(f"{CENSUS_YEAR}n"):
+                    print(f"    {CENSUS_YEAR} population differs and is sourced")
                     continue
-            # Otherwise update or add 2020
-            template.add("2020", pop)
-            template.add("2020n", CENSUS_REF)
+            template.add(CENSUS_YEAR, pop)
+            template.add(f"{CENSUS_YEAR}n", CENSUS_REF)
             modified = True
 
             # if the census is newer than estyear, remove estyear and est and estref
             if template.has("estyear"):
-                estyear = template.get("estyear").value.strip()
+                estyear = template.get("estyear").value.strip().replace(',','')
                 if estyear.isdigit() and int(estyear) <= CENSUS_YEAR:
+                    print(f"    Removing outdated estimates for {estyear}")
                     for param in ["estyear", "estimate", "estref"]:
                         if template.has(param):
                             template.remove(param)
 
             if est:
-                template.add("estyear", EST_YEAR)
-                template.add("estimate", est)
-                template.add("estref", CENSUS_EST_REF)
-                modified = True
+                skip = False
+                # if there is already estimate for EST_YEAR or if the existing estyear is newer than EST_YEAR, skip
+                if template.has("estyear"):
+                    existing_estyear = template.get("estyear").value.strip().replace(',','')
+                    if existing_estyear.isdigit() and int(existing_estyear) >= EST_YEAR:
+                        print(f"    Skipping estimate for {EST_YEAR}: existing estyear is newer or same")
+                        skip = True
+                if not skip:
+                    print(f"    Adding estimate for {EST_YEAR}")
+                    template.add("estyear", EST_YEAR)
+                    template.add("estimate", est)
+                    template.add("estref", CENSUS_EST_REF)
+                    modified = True
 
         # ensure there is only one of each template
         if name == "infobox settlement" and len(wikicode.filter_templates(matches=lambda t: t.name.strip().lower() == "infobox settlement")) == 1:
-            # ensure page contains "US Census population" or "United States"
-            if not ("us census population" in text.lower() or "united states" in text.lower()):
-                print(f"Skipping {title}: does not appear to be a US location")
-                continue
             # similar to before now. check if population_as_of is older than census year
             if template.has("population_as_of"):
                 if not CENSUS_YEAR in template.get("population_as_of").value and template.has("population_total"):
@@ -154,11 +167,12 @@ for page in pages:
                             year = int(part)
                             break
                     if year is not None and year > CENSUS_YEAR:
-                        print(f"Skipping {title}: population_as_of is newer than census year")
+                        print(f".   Skipping {title}: population_as_of is newer than census year")
                         continue
                     # If we get here, population_as_of is older than census year
+                    print(f".   Updating population to {CENSUS_YEAR} census")
                     template.add("population_as_of", f"[[{CENSUS_YEAR} United States Census|{CENSUS_YEAR}]]")
-                    template.add("population_total", pop)
+                    template.add("population_total", f"{pop:,}")
                     modified = True
                 if template.has("population_est") and template.has("population_est_as_of"):
                     estyear_str = template.get("population_est_as_of").value.strip()
@@ -168,34 +182,25 @@ for page in pages:
                             estyear = int(part)
                             break
                     if estyear is not None and estyear <= CENSUS_YEAR:
+                        print(f".   Removing outdated estimates for {estyear}")
                         for param in ["population_est", "population_est_as_of", "population_est_footnotes"]:
                             if template.has(param):
                                 template.remove(param)
                         modified = True
                 if est:
                     template.add("pop_est_as_of", EST_YEAR)
-                    template.add("population_est", est)
-                    '''
-                    if template.has("pop_est_footnotes"):
-                        footnotes = template.get("pop_est_footnotes").value.strip()
-                        if CENSUS_EST_REF not in footnotes:
-                            footnotes += f" {CENSUS_EST_REF}"
-                        template.add("pop_est_footnotes", footnotes)
-                    else:
-                        template.add("pop_est_footnotes", CENSUS_EST_REF)
-                    '''
+                    template.add("population_est", f"{est:,}")
                     modified = True
 
 
     if modified:
         page.text = str(wikicode)
         subprocess.run("pbcopy", text=True, input=str(wikicode))
-        print(f"Modified text for {title}. Review and save manually.")
+        print(f"Modified text for {title}.")
         '''
         try:
-            page.save(summary=f"Update population to {CENSUS_YEAR} Census ({pop}) and remove outdated estimates")
+            page.save(summary=f"Update census info")
             total += 1
-            print(f"Updated {title}")
         except Exception as e:
             print(f"Failed to save {title}: {e}")
         '''
