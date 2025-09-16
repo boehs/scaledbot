@@ -3,7 +3,6 @@ import mwparserfromhell
 
 def allow_bots(text, user):
 	user = user.lower().strip()
-	text = mwparserfromhell.parse(text)
 	for tl in text.filter_templates():
 		if tl.name.matches(['bots', 'nobots']):
 			break

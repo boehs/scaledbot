@@ -44,16 +44,15 @@ with open(os.path.join(os.path.dirname(__file__), "census_est.csv"), newline='',
 site = pywikibot.Site("en", "wikipedia")
 #site.login()
 
-
 # Get pages that transclude the templates
 templates = ["Template:US Census population", "Template:Infobox settlement"]
 pages = set()
-
+'''
 for t in templates:
     tpl = pywikibot.Page(site, t)
     for trans in tpl.getReferences(only_template_inclusion=True, follow_redirects=False):
         pages.add(trans)
-
+'''
 # add to pages using Category:Pages using US Census population needing update
 cat = pywikibot.Category(site, "Category:Pages using US Census population needing update")
 for page in cat.articles():
@@ -69,10 +68,6 @@ def normalize_title(title):
 # Main loop
 total = 0
 for page in pages:
-    if not allow_bots(page,"Scaledbot"):
-        print(f"Skipping {page.title()}: bots not allowed")
-        continue
-
     title = str(page.title())
     found = False
     norm_title = normalize_title(title)
@@ -99,8 +94,8 @@ for page in pages:
             continue
     print(f"Processing {title} as {norm_title}")
 
-    pop = census_data[norm_title]["population"]
-    est = census_data[norm_title].get("est", None)
+    pop = int(census_data[norm_title]["population"])
+    est = int(census_data[norm_title].get("est", None))
 
     try:
         text = page.get()
@@ -110,10 +105,14 @@ for page in pages:
 
     # ensure page contains "US Census population" or "United States"
     if not ("us census population" in text.lower() or "united states" in text.lower()):
-        print(f".    Skipping {title}: does not appear to be a US location")
+        print(f"     Skipping {title}: does not appear to be a US location")
         continue
 
     wikicode = mwparserfromhell.parse(text)
+    if not allow_bots(wikicode,"Scaledbot"):
+        print(f"Skipping {page.title()}: bots not allowed")
+        continue
+
     modified = False
 
     for template in wikicode.filter_templates():
