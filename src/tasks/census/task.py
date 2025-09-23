@@ -47,12 +47,10 @@ site = pywikibot.Site("en", "wikipedia")
 # Get pages that transclude the templates
 templates = ["Template:US Census population", "Template:Infobox settlement"]
 pages = set()
-'''
 for t in templates:
     tpl = pywikibot.Page(site, t)
     for trans in tpl.getReferences(only_template_inclusion=True, follow_redirects=False):
         pages.add(trans)
-'''
 # add to pages using Category:Pages using US Census population needing update
 cat = pywikibot.Category(site, "Category:Pages using US Census population needing update")
 for page in cat.articles():
@@ -122,7 +120,7 @@ for page in pages:
             # check if it has 2020
             if template.has(CENSUS_YEAR):
                 # if there is a discrepancy and it is sourced we let it slide
-                if template.get(CENSUS_YEAR).value.strip() != pop and template.has(f"{CENSUS_YEAR}n"):
+                if int(template.get(CENSUS_YEAR).value.strip().replace(',', '')) != pop and template.has(f"{CENSUS_YEAR}n"):
                     print(f"    {CENSUS_YEAR} population differs and is sourced")
                     continue
             template.add(CENSUS_YEAR, pop)
@@ -173,23 +171,23 @@ for page in pages:
                     template.add("population_as_of", f"[[{CENSUS_YEAR} United States Census|{CENSUS_YEAR}]]")
                     template.add("population_total", f"{pop:,}")
                     modified = True
-                if template.has("population_est") and template.has("population_est_as_of"):
-                    estyear_str = template.get("population_est_as_of").value.strip()
-                    estyear = None
-                    for part in estyear_str.split():
-                        if part.isdigit():
-                            estyear = int(part)
-                            break
-                    if estyear is not None and estyear <= CENSUS_YEAR:
-                        print(f".   Removing outdated estimates for {estyear}")
-                        for param in ["population_est", "population_est_as_of", "population_est_footnotes"]:
-                            if template.has(param):
-                                template.remove(param)
-                        modified = True
-                if est:
-                    template.add("pop_est_as_of", EST_YEAR)
-                    template.add("population_est", f"{est:,}")
+            if template.has("population_est") and template.has("population_est_as_of"):
+                estyear_str = template.get("population_est_as_of").value.strip()
+                estyear = None
+                for part in estyear_str.split():
+                    if part.isdigit():
+                        estyear = int(part)
+                        break
+                if estyear is not None and estyear <= CENSUS_YEAR:
+                    print(f".   Removing outdated estimates for {estyear}")
+                    for param in ["population_est", "population_est_as_of", "population_est_footnotes"]:
+                        if template.has(param):
+                            template.remove(param)
                     modified = True
+            if est:
+                template.add("pop_est_as_of", EST_YEAR)
+                template.add("population_est", f"{est:,}")
+                modified = True
 
 
     if modified:
