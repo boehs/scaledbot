@@ -9,10 +9,10 @@ from src.shared import allow_bots
 # CONFIG
 CSV_FILE = "census_latest.csv"  # format: geoid,place,population
 CENSUS_YEAR = 2020  # adjust to latest census year
-CENSUS_REF = "<ref>{{cite web |title=Decennial Census of Population and Housing |url=https://www.census.gov/programs-surveys/decennial-census.html |publisher=United States Census Bureau |access-date=2025-09-16}}</ref>"
+CENSUS_REF = "<ref>{{Cite web |date=2020-04-01 |title=2020 Census Decennial Demographic and Housing Characteristics: Population by Place (Table P1) |url=https://data.census.gov/table/DECENNIALDHC2020.P1?t=Populations+and+People&g=010XX00US$0600000,$1600000&d=DEC+Demographic+and+Housing+Characteristics |archive-url=https://archive.is/XepMr |archive-date=2025-09-24 |access-date=2025-09-24 |website=Census Bureau Data}}</ref>"
 CENSUS_EST_REF = "<ref>{{cite web |title=Annual Estimates of the Resident Population |url=https://www.census.gov/data/tables/time-series/demo/popest/2020s-total-cities-and-towns.html |publisher=United States Census Bureau |access-date=2025-09-16}}</ref>"
 EST_YEAR = 2024
-BATCH = 1
+BATCH = "1"
 
 # Load census data into dict
 census_data = {}
@@ -24,7 +24,10 @@ with open(os.path.join(os.path.dirname(__file__), CSV_FILE), newline='', encodin
     next(reader)  # skip second metadata row
     for row in reader:
         key = row["NAME"].strip()
-        key = key.replace(" CDP", "")
+        # if the key goes like "X city, Y county, Z state", remove "Y county"
+        parts = key.split(",")
+        if len(parts) == 3 and "county" in parts[1].lower():
+            key = f"{parts[0].strip()}, {parts[2].strip()}"
         census_data[key] = {
             "geoid": row["GEO_ID"],
             "population": row["P1_001N"]
@@ -109,18 +112,48 @@ for page in pages:
     title = str(page.title())
     found = False
     norm_title = normalize_title(title)
+    text = None
     if norm_title not in census_data:
         # try searching with "city", "town", "village", "township"
         # Split on comma and try adding suffix to the first part
         parts = norm_title.split(", ")
+        canidates = []
         for suffix in [" city", " town", " village", " township", " CDP"]:
             test_name = parts[0] + suffix
             if len(parts) > 1:
                 test_name += ", " + ", ".join(parts[1:])
             if test_name in census_data:
-                norm_title = test_name
-                found = True
-                break
+                canidates.append(test_name)
+        if len(canidates) == 1:
+            norm_title = canidates[0]
+            found = True
+        elif len(canidates) > 1:
+            print(f"   Multiple candidates found: {', '.join(canidates)}")
+            try:
+                text = page.get()
+            except Exception as e:
+                pass
+            if text:
+                wikicode = mwparserfromhell.parse(text)
+                # attempt to get FIPS code from text by checking if infobox settlement has string "FIPS code" in "blank_name" or "blank1_name" and then use "blank_info" or "blank1_info"
+                for template in wikicode.filter_templates():
+                    name = template.name.strip().lower()
+                    fips_code = None
+                    if name == "infobox settlement" and len(wikicode.filter_templates(matches=lambda t: t.name.strip().lower() == "infobox settlement")) == 1:
+                        if template.has("blank_name") and "FIPS code" in template.get("blank_name").value:
+                            fips_code = template.get("blank_info").value.strip().replace("-", "")
+                            print(f"   Found FIPS code {fips_code} for {title}")
+                        elif template.has("blank1_name") and "FIPS code" in template.get("blank1_name").value:
+                            fips_code = template.get("blank1_info").value.strip().replace("-", "")
+                            print(f"   Found FIPS code {fips_code} for {title}")
+                    if fips_code is not None:
+                        for canidate in canidates:
+                            if census_data[canidate]["geoid"].endswith(fips_code):
+                                norm_title = canidate
+                                found = True
+                                print(f"   Matched {title} to {norm_title} via FIPS code")
+                                break
+
         # Try fuzzy matching for minor discrepancies
         if not found:
             best_match = get_close_matches(norm_title, census_data.keys(), n=1, cutoff=0.95)
@@ -136,12 +169,13 @@ for page in pages:
     pop = int(census_data[norm_title]["population"])
     est = int(census_data[norm_title].get("est", None))
 
-    try:
-        text = page.get()
-    except Exception as e:
-        print(f"Skipping {title}: {e}")
-        update_progress(page.title(), {"error": str(e)})
-        continue
+    if text is None:
+        try:
+            text = page.get()
+        except Exception as e:
+            print(f"Skipping {title}: {e}")
+            update_progress(page.title(), {"error": str(e)})
+            continue
 
     # ensure page contains "US Census population" or "United States"
     if not ("us census population" in text.lower() or "united states" in text.lower()):
