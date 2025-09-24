@@ -47,11 +47,13 @@ with open(os.path.join(os.path.dirname(__file__), "progress.json"), "r") as f:
 
 # Connect to enwiki
 site = pywikibot.Site("en", "wikipedia")
-#site.login()
+site.login()
+print("As user:", site.user())
 
 # Get pages that transclude the templates
 templates = ["Template:US Census population", "Template:Infobox settlement"]
 pages = set()
+'''
 for t in templates:
     tpl = pywikibot.Page(site, t)
     for trans in tpl.getReferences(only_template_inclusion=True, follow_redirects=False):
@@ -64,10 +66,18 @@ for t in templates:
             if str(trans.title()) not in progress:
                 progress[str(trans.title())] = {}
                 progress[str(trans.title())][BATCH] = {}
+'''
 # add to pages using Category:Pages using US Census population needing update
 cat = pywikibot.Category(site, "Category:Pages using US Census population needing update")
 for page in cat.articles():
-    pages.add(page)
+    if str(page.title()) in progress and BATCH in progress[str(page.title())] and len(progress[str(page.title())][BATCH]) > 0:
+        print(f"    Skipping {page.title()}: already processed")
+    else:
+        pages.add(page)
+        # add page to progress
+        if str(page.title()) not in progress:
+            progress[str(page.title())] = {}
+            progress[str(page.title())][BATCH] = {}
 # Helper: normalize title
 def normalize_title(title):
     parts = [p.strip() for p in title.split(",")]
@@ -77,7 +87,7 @@ def normalize_title(title):
 
 def form_edits_summary(tasks: list[str]):
     str = "Update census info: " + tasks[0]
-    # group by perfix before colon, such that it looks like "usp: (+latest res, -old est); ibox: (+latest res)"
+    # group by prefix before colon, such that it looks like "ucp: (+latest res, -old est); ibox: (+latest res)"
     task_dict = {}
     for task in tasks[1:]:
         prefix, action = task.split(": ")
@@ -175,7 +185,7 @@ for page in pages:
                         if template.has(param):
                             template.remove(param)
                     modified = True
-                    tasks.append("usp: -old est")
+                    tasks.append("ucp: -old est")
 
             if est:
                 skip = False
@@ -191,9 +201,12 @@ for page in pages:
                     template.add("estimate", est)
                     template.add("estref", CENSUS_EST_REF)
                     modified = True
-                    tasks.remove("usp: -old est")
-                    tasks.remove("usp: -est w no estyear")
-                    tasks.append("usp: +lastest est")
+                    try:
+                        tasks.remove("ucp: -old est")
+                        tasks.remove("ucp: -est w no estyear")
+                    except ValueError:
+                        pass
+                    tasks.append("ucp: +lastest est")
 
         if name == "infobox settlement" and len(wikicode.filter_templates(matches=lambda t: t.name.strip().lower() == "infobox settlement")) == 1:
             # similar to before now. check if population_as_of is older than census year
@@ -237,19 +250,22 @@ for page in pages:
                 template.add("population_est", f"{est:,}")
                 modified = True
                 tasks.append("ibox: +latest est")
-                tasks.remove("ibox: -old est")
-
+                try:
+                    tasks.remove("ibox: -old est")
+                except ValueError:
+                    pass
 
     if modified:
         page.text = str(wikicode)
         print(f"Modified text for {title}.")
         try:
-            page.save(summary=form_edits_summary(tasks), botflag=True)
+            page.save(summary=form_edits_summary(tasks), bot=True)
             total += 1
         except Exception as e:
             print(f"Failed to save {title}: {e}")
             update_progress(page.title(), {"error": str(e)})
         finally:
+            print("Saved with summary:", form_edits_summary(tasks) + " n." + str(total))
             update_progress(page.title(), {"tasks": tasks, "census_name": norm_title})
     else:
         update_progress(page.title(), {"skipped": "no changes needed"})
