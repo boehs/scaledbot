@@ -3,7 +3,7 @@ import pywikibot
 import csv
 import mwparserfromhell
 from difflib import get_close_matches
-import subprocess
+import json
 from src.shared import allow_bots
 
 # CONFIG
@@ -12,6 +12,7 @@ CENSUS_YEAR = 2020  # adjust to latest census year
 CENSUS_REF = "<ref>{{cite web |title=Decennial Census of Population and Housing |url=https://www.census.gov/programs-surveys/decennial-census.html |publisher=United States Census Bureau |access-date=2025-09-16}}</ref>"
 CENSUS_EST_REF = "<ref>{{cite web |title=Annual Estimates of the Resident Population |url=https://www.census.gov/data/tables/time-series/demo/popest/2020s-total-cities-and-towns.html |publisher=United States Census Bureau |access-date=2025-09-16}}</ref>"
 EST_YEAR = 2024
+BATCH = 1
 
 # Load census data into dict
 census_data = {}
@@ -40,6 +41,10 @@ with open(os.path.join(os.path.dirname(__file__), "census_est.csv"), newline='',
         if key in census_data:
             census_data[key]["est"] = row["P1_001N"]
 
+# progress json
+with open(os.path.join(os.path.dirname(__file__), "progress.json"), "r") as f:
+    progress = json.load(f)
+
 # Connect to enwiki
 site = pywikibot.Site("en", "wikipedia")
 #site.login()
@@ -50,18 +55,43 @@ pages = set()
 for t in templates:
     tpl = pywikibot.Page(site, t)
     for trans in tpl.getReferences(only_template_inclusion=True, follow_redirects=False):
-        pages.add(trans)
+        # check if progress has this page, and if batch 1 exists
+        if str(trans.title()) in progress and BATCH in progress[str(trans.title())] and len(progress[str(trans.title())][BATCH]) > 0:
+            print(f"    Skipping {trans.title()}: already processed")
+        else:
+            pages.add(trans)
+            # add page to progress
+            if str(trans.title()) not in progress:
+                progress[str(trans.title())] = {}
+                progress[str(trans.title())][BATCH] = {}
 # add to pages using Category:Pages using US Census population needing update
 cat = pywikibot.Category(site, "Category:Pages using US Census population needing update")
 for page in cat.articles():
     pages.add(page)
-
 # Helper: normalize title
 def normalize_title(title):
     parts = [p.strip() for p in title.split(",")]
     if len(parts) == 3:
         return f"{parts[0]}, {parts[2]}"
     return title.strip()
+
+def form_edits_summary(tasks: list[str]):
+    str = "Update census info: " + tasks[0]
+    # group by perfix before colon, such that it looks like "usp: (+latest res, -old est); ibox: (+latest res)"
+    task_dict = {}
+    for task in tasks[1:]:
+        prefix, action = task.split(": ")
+        if prefix not in task_dict:
+            task_dict[prefix] = []
+        task_dict[prefix].append(action)
+    for prefix, actions in task_dict.items():
+        str += f"; {prefix}: ({', '.join(actions)})"
+    return str
+
+def update_progress(page_title, data):
+    progress[str(page_title)][BATCH] = data
+    with open(os.path.join(os.path.dirname(__file__), "progress.json"), "w") as f:
+        json.dump(progress, f, indent=2)
 
 # Main loop
 total = 0
@@ -89,6 +119,7 @@ for page in pages:
                 found = True
         if not found:
             print(f"Skipping {title}: not found in census data")
+            update_progress(page.title(), {"skipped": "not found in census data"})
             continue
     print(f"Processing {title} as {norm_title}")
 
@@ -99,33 +130,41 @@ for page in pages:
         text = page.get()
     except Exception as e:
         print(f"Skipping {title}: {e}")
+        update_progress(page.title(), {"error": str(e)})
         continue
 
     # ensure page contains "US Census population" or "United States"
     if not ("us census population" in text.lower() or "united states" in text.lower()):
         print(f"     Skipping {title}: does not appear to be a US location")
+        update_progress(page.title(), {"skipped": "not a US location"})
         continue
 
     wikicode = mwparserfromhell.parse(text)
     if not allow_bots(wikicode,"Scaledbot"):
         print(f"Skipping {page.title()}: bots not allowed")
+        update_progress(page.title(), {"skipped": "bots not allowed"})
         continue
 
     modified = False
+
+    tasks = [f"Matched {norm_title}"]
 
     for template in wikicode.filter_templates():
         name = template.name.strip().lower()
 
         if name == "us census population" and len(wikicode.filter_templates(matches=lambda t: t.name.strip().lower() == "us census population")) == 1:
-            # check if it has 2020
-            if template.has(CENSUS_YEAR):
-                # if there is a discrepancy and it is sourced we let it slide
-                if int(template.get(CENSUS_YEAR).value.strip().replace(',', '')) != pop and template.has(f"{CENSUS_YEAR}n"):
-                    print(f"    {CENSUS_YEAR} population differs and is sourced")
-                    continue
-            template.add(CENSUS_YEAR, pop)
-            template.add(f"{CENSUS_YEAR}n", CENSUS_REF)
-            modified = True
+            # check if it has 2020 and if it is sourced
+            if template.has(CENSUS_YEAR) and int(template.get(CENSUS_YEAR).value.strip().replace(',', '')) != pop and template.has(f"{CENSUS_YEAR}n"):
+                print(f"    {CENSUS_YEAR} population differs and is sourced")
+            elif template.has(CENSUS_YEAR) and int(template.get(CENSUS_YEAR).value.strip().replace(',', '')) == pop:
+                print(f"    {CENSUS_YEAR} population is up to date")
+            else:
+                template.add(CENSUS_YEAR, pop)
+                template.add(f"{CENSUS_YEAR}n", CENSUS_REF)
+                modified = True
+                tasks.append("ucp: +latest res")
+
+            # ESTIMATES #
 
             # if the census is newer than estyear, remove estyear and est and estref
             if template.has("estyear"):
@@ -135,6 +174,8 @@ for page in pages:
                     for param in ["estyear", "estimate", "estref"]:
                         if template.has(param):
                             template.remove(param)
+                    modified = True
+                    tasks.append("usp: -old est")
 
             if est:
                 skip = False
@@ -150,56 +191,67 @@ for page in pages:
                     template.add("estimate", est)
                     template.add("estref", CENSUS_EST_REF)
                     modified = True
+                    tasks.remove("usp: -old est")
+                    tasks.remove("usp: -est w no estyear")
+                    tasks.append("usp: +lastest est")
 
-        # ensure there is only one of each template
         if name == "infobox settlement" and len(wikicode.filter_templates(matches=lambda t: t.name.strip().lower() == "infobox settlement")) == 1:
             # similar to before now. check if population_as_of is older than census year
+            current_year = None
             if template.has("population_as_of"):
                 if not CENSUS_YEAR in template.get("population_as_of").value and template.has("population_total"):
                     # find a number in population_as_of
                     year_str = template.get("population_as_of").value.strip()
-                    year = None
                     for part in year_str.split():
                         if part.isdigit():
-                            year = int(part)
+                            current_year = int(part)
                             break
-                    if year is not None and year > CENSUS_YEAR:
+                    if current_year is not None and current_year > CENSUS_YEAR:
                         print(f".   Skipping {title}: population_as_of is newer than census year")
-                        continue
-                    # If we get here, population_as_of is older than census year
-                    print(f".   Updating population to {CENSUS_YEAR} census")
-                    template.add("population_as_of", f"[[{CENSUS_YEAR} United States Census|{CENSUS_YEAR}]]")
-                    template.add("population_total", f"{pop:,}")
-                    modified = True
+                    else:
+                        # If we get here, population_as_of is older than census year
+                        print(f".   Updating population to {CENSUS_YEAR} census")
+                        template.add("population_as_of", f"[[{CENSUS_YEAR} United States Census|{CENSUS_YEAR}]]")
+                        template.add("population_total", f"{pop:,}")
+                        modified = True
+                        tasks.append("ibox: +latest res")
+            if current_year is None or (current_year is not None and current_year < CENSUS_YEAR):
+                current_year = CENSUS_YEAR
+            # ESTIMATES #
+            current_estyear: None | int = None
             if template.has("population_est") and template.has("population_est_as_of"):
                 estyear_str = template.get("population_est_as_of").value.strip()
-                estyear = None
                 for part in estyear_str.split():
                     if part.isdigit():
-                        estyear = int(part)
+                        current_estyear = int(part)
                         break
-                if estyear is not None and estyear <= CENSUS_YEAR:
-                    print(f".   Removing outdated estimates for {estyear}")
+                if current_estyear is not None and current_estyear < current_year:
+                    print(f".   Removing outdated estimates for {current_estyear}")
                     for param in ["population_est", "population_est_as_of", "population_est_footnotes"]:
                         if template.has(param):
                             template.remove(param)
                     modified = True
-            if est:
+                    tasks.append("ibox: -old est")
+            if est and (current_estyear is None or (current_estyear is not None and current_estyear < EST_YEAR)):
                 template.add("pop_est_as_of", EST_YEAR)
                 template.add("population_est", f"{est:,}")
                 modified = True
+                tasks.append("ibox: +latest est")
+                tasks.remove("ibox: -old est")
 
 
     if modified:
         page.text = str(wikicode)
-        subprocess.run("pbcopy", text=True, input=str(wikicode))
         print(f"Modified text for {title}.")
-        '''
         try:
-            page.save(summary=f"Update census info")
+            page.save(summary=form_edits_summary(tasks), botflag=True)
             total += 1
         except Exception as e:
             print(f"Failed to save {title}: {e}")
-        '''
+            update_progress(page.title(), {"error": str(e)})
+        finally:
+            update_progress(page.title(), {"tasks": tasks, "census_name": norm_title})
+    else:
+        update_progress(page.title(), {"skipped": "no changes needed"})
 
 print(f"Done. Updated {total} pages.")
